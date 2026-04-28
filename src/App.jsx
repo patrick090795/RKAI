@@ -24,10 +24,15 @@ import { useEffect, useMemo, useState } from "react";
 import {
   askBackendQuestion,
   checkApiHealth,
+  fetchAuthMe,
   fetchDocuments,
   fetchQuestionHistory,
   ingestUrlSource,
+  loginAdmin,
+  logoutAdmin,
   sendFeedback,
+  updateDocumentStatus,
+  uploadPdfSource,
 } from "./api";
 
 const FALLBACK = "I am not sure based on the available trusted sources.";
@@ -444,10 +449,54 @@ function App() {
   const [adminDocuments, setAdminDocuments] = useState(sourceDocuments);
   const [ingestForm, setIngestForm] = useState({
     title: "",
+    sourceType: "URL",
     sourceUrl: "",
+    file: null,
     category: "Public services",
     language: "English",
   });
+  const [authState, setAuthState] = useState({
+    checking: true,
+    authenticated: false,
+    user: null,
+  });
+  const [authForm, setAuthForm] = useState({
+    username: "",
+    password: "",
+  });
+  const [authNotice, setAuthNotice] = useState("");
+
+  function resetIngestForm() {
+    setIngestForm({
+      title: "",
+      sourceType: "URL",
+      sourceUrl: "",
+      file: null,
+      category: "Public services",
+      language: "English",
+    });
+  }
+
+  function updateAuthState(payload) {
+    setAuthState({
+      checking: false,
+      authenticated: Boolean(payload?.authenticated),
+      user: payload?.user || null,
+    });
+  }
+
+  async function loadAuthenticatedData() {
+    const [documents, history] = await Promise.all([
+      fetchDocuments(),
+      fetchQuestionHistory().catch(() => []),
+    ]);
+    if (documents.length) {
+      setAdminDocuments(documents);
+    }
+    if (history.length) {
+      setAnswers(history);
+    }
+  }
 
   useEffect(() => {
     let isMounted = true;
@@ -455,21 +504,29 @@ function App() {
     async function hydrateFromApi() {
       try {
         await checkApiHealth();
-        const [documents, history] = await Promise.all([
-          fetchDocuments(),
-          fetchQuestionHistory().catch(() => []),
-        ]);
-        if (!isMounted) return;
         setApiStatus("online");
-        if (documents.length) {
-          setAdminDocuments(documents);
-        }
-        if (history.length) {
-          setAnswers(history);
-        }
       } catch {
         if (isMounted) {
           setApiStatus("offline");
+          updateAuthState({
+            authenticated: false,
+            user: null,
+          });
+        }
+        return;
+      }
+
+      try {
+        const me = await fetchAuthMe();
+        if (!isMounted) return;
+        updateAuthState(me);
+        await loadAuthenticatedData();
+      } catch {
+        if (isMounted) {
+          updateAuthState({
+            authenticated: false,
+            user: null,
+          });
         }
       }
     }
@@ -483,6 +540,11 @@ function App() {
   const latestAnswer = answers[0];
   const lowConfidenceAnswers = answers.filter(
     (item) => item.status !== "Answered" || item.confidence < 0.74,
+  );
+  const canViewAdmin = Boolean(authState.authenticated && authState.user?.isStaff);
+  const visibleNavItems = useMemo(
+    () => navItems.filter((item) => item.id !== "admin" || canViewAdmin),
+    [canViewAdmin],
   );
 
   const categories = useMemo(
@@ -546,18 +608,60 @@ function App() {
     }
   }
 
+  async function submitAdminLogin(event) {
+    event.preventDefault();
+    if (!authForm.username.trim() || !authForm.password) return;
+
+    setAuthNotice("");
+    try {
+      const session = await loginAdmin({
+        username: authForm.username.trim(),
+        password: authForm.password,
+      });
+      updateAuthState(session);
+      await loadAuthenticatedData();
+      setAuthForm({ username: "", password: "" });
+      setApiStatus("online");
+      setAuthNotice(`Signed in as ${session.user.username}.`);
+    } catch {
+      setAuthNotice("Sign-in failed. Check username or password.");
+    }
+  }
+
+  async function submitAdminLogout() {
+    setAuthNotice("");
+    try {
+      await logoutAdmin();
+    } finally {
+      updateAuthState({
+        authenticated: false,
+        user: null,
+      });
+      setAuthNotice("Signed out.");
+      setActiveView("ask");
+    }
+  }
+
   async function addAdminDocument(event) {
     event.preventDefault();
-    if (!ingestForm.title.trim()) return;
-    const hasSourceUrl = Boolean(ingestForm.sourceUrl.trim());
+    const cleanTitle = ingestForm.title.trim();
+    const cleanUrl = ingestForm.sourceUrl.trim();
+    const isUrlSource = ingestForm.sourceType === "URL";
+    const hasSourceUrl = Boolean(cleanUrl);
+    const hasFile = Boolean(ingestForm.file);
+    if (!cleanTitle) return;
+    if (isUrlSource && !hasSourceUrl) return;
+    if (!isUrlSource && !hasFile) return;
 
     const pendingDocument = {
       id: `queued-${Date.now()}`,
-      title: ingestForm.title.trim(),
+      title: cleanTitle,
       category: ingestForm.category,
       language: ingestForm.language,
-      sourceType: hasSourceUrl ? "URL" : "PDF",
-      sourceUrl: hasSourceUrl ? ingestForm.sourceUrl.trim() : "upload://pending-file",
+      sourceType: isUrlSource ? "URL" : "PDF",
+      sourceUrl: isUrlSource
+        ? cleanUrl
+        : `upload://${ingestForm.file?.name || "pending-file"}`,
       owner: "Admin upload",
       status: "Pending review",
       freshness: "Queued",
@@ -566,39 +670,85 @@ function App() {
       chunks: [],
     };
 
-    if (!hasSourceUrl) {
-      setAdminDocuments((current) => [pendingDocument, ...current]);
-      setIngestForm({
-        title: "",
-        sourceUrl: "",
-        category: "Public services",
-        language: "English",
-      });
-      return;
-    }
-
     try {
-      const savedDocument = await ingestUrlSource({
-        title: ingestForm.title.trim(),
+      const payload = {
+        title: cleanTitle,
         description:
           "New source queued for extraction, chunking, embedding, approval, and freshness review.",
-        sourceUrl: ingestForm.sourceUrl.trim(),
         category: ingestForm.category,
         language: ingestForm.language,
-      });
+      };
+      const savedDocument = isUrlSource
+        ? await ingestUrlSource({ ...payload, sourceUrl: cleanUrl })
+        : await uploadPdfSource({ ...payload, file: ingestForm.file });
       setAdminDocuments((current) => [savedDocument, ...current]);
       setApiStatus("online");
-    } catch {
+    } catch (error) {
+      const message = String(error?.message || "").toLowerCase();
+      const isPermissionIssue =
+        message.includes("authentication credentials") ||
+        message.includes("permission") ||
+        message.includes("forbidden") ||
+        message.includes("403");
+      if (isPermissionIssue) {
+        setAuthNotice("Admin authentication is required for this action.");
+        return;
+      }
       setAdminDocuments((current) => [pendingDocument, ...current]);
       setApiStatus("offline");
     }
 
-    setIngestForm({
-      title: "",
-      sourceUrl: "",
-      category: "Public services",
-      language: "English",
-    });
+    resetIngestForm();
+  }
+
+  async function setDocumentReviewStatus(documentId, nextStatus, label) {
+    try {
+      const updated = await updateDocumentStatus({ documentId, status: nextStatus });
+      setAdminDocuments((current) =>
+        current.map((document) => (document.id === documentId ? updated : document)),
+      );
+      setApiStatus("online");
+      setAuthNotice(`Source marked as ${label}.`);
+    } catch (error) {
+      const message = String(error?.message || "").toLowerCase();
+      const isPermissionIssue =
+        message.includes("authentication credentials") ||
+        message.includes("permission") ||
+        message.includes("forbidden") ||
+        message.includes("401") ||
+        message.includes("403");
+      if (isPermissionIssue) {
+        setAuthNotice("Staff admin access is required for status updates.");
+      } else {
+        setAuthNotice("Could not update source status right now.");
+      }
+    }
+  }
+
+  if (authState.checking) {
+    return (
+      <div className="app-shell">
+        <main className="workspace">
+          <section className="content-stack">
+            <div className="review-panel">
+              <p className="empty-state">Checking sign-in...</p>
+            </div>
+          </section>
+        </main>
+      </div>
+    );
+  }
+
+  if (!authState.authenticated) {
+    return (
+      <LoginView
+        apiStatus={apiStatus}
+        authForm={authForm}
+        setAuthForm={setAuthForm}
+        authNotice={authNotice}
+        submitAdminLogin={submitAdminLogin}
+      />
+    );
   }
 
   return (
@@ -615,7 +765,7 @@ function App() {
         </div>
 
         <nav className="nav-list" aria-label="Primary">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
               <button
@@ -645,7 +795,7 @@ function App() {
         <header className="topbar">
           <div>
             <p className="eyebrow">MVP prototype</p>
-            <h2>{viewTitle(activeView)}</h2>
+            <h2>{viewTitle(activeView, canViewAdmin)}</h2>
           </div>
           <div className="system-signals" aria-label="System status">
             <span className={`api-status ${apiStatus}`}>
@@ -664,10 +814,18 @@ function App() {
               <Languages size={16} />
               EN / RW
             </span>
-            <span>
+            <button
+              type="button"
+              className="admin-status-action"
+              onClick={() => setActiveView("admin")}
+            >
               <LockKeyhole size={16} />
-              Admin gated
-            </span>
+              {authState.authenticated
+                ? authState.user?.isStaff
+                  ? `Admin: ${authState.user?.username || "signed in"}`
+                  : `User: ${authState.user?.username || "signed in"}`
+                : "Sign-in required"}
+            </button>
           </div>
         </header>
 
@@ -696,12 +854,30 @@ function App() {
           />
         )}
 
-        {activeView === "admin" && (
+        {activeView === "admin" && canViewAdmin && (
           <AdminView
             documents={adminDocuments}
             ingestForm={ingestForm}
             setIngestForm={setIngestForm}
             addAdminDocument={addAdminDocument}
+            authState={authState}
+            authForm={authForm}
+            setAuthForm={setAuthForm}
+            authNotice={authNotice}
+            submitAdminLogin={submitAdminLogin}
+            submitAdminLogout={submitAdminLogout}
+            setDocumentReviewStatus={setDocumentReviewStatus}
+          />
+        )}
+        {activeView === "admin" && !canViewAdmin && (
+          <AccessRequiredView
+            setActiveView={setActiveView}
+            authState={authState}
+            authForm={authForm}
+            setAuthForm={setAuthForm}
+            authNotice={authNotice}
+            submitAdminLogin={submitAdminLogin}
+            submitAdminLogout={submitAdminLogout}
           />
         )}
 
@@ -717,17 +893,160 @@ function App() {
   );
 }
 
-function viewTitle(activeView) {
+function viewTitle(activeView, canViewAdmin) {
   switch (activeView) {
     case "library":
       return "Knowledge Library";
     case "admin":
-      return "Source Governance";
+      return canViewAdmin ? "Source Governance" : "Admin Access Required";
     case "quality":
       return "Feedback and Evaluation";
     default:
       return "Ask from trusted sources";
   }
+}
+
+function LoginView({ apiStatus, authForm, setAuthForm, authNotice, submitAdminLogin }) {
+  return (
+    <div className="app-shell">
+      <main className="workspace">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">Rwanda Knowledge</p>
+            <h2>Sign In Required</h2>
+          </div>
+          <div className="system-signals" aria-label="System status">
+            <span className={`api-status ${apiStatus}`}>
+              <Database size={16} />
+              {apiStatus === "online"
+                ? "API connected"
+                : apiStatus === "checking"
+                  ? "Checking API"
+                  : "API unavailable"}
+            </span>
+          </div>
+        </header>
+
+        <section className="content-stack">
+          <form className="question-panel auth-inline-form" onSubmit={submitAdminLogin}>
+            <div className="section-heading">
+              <LockKeyhole size={18} />
+              <h3>Account login</h3>
+            </div>
+            <label htmlFor="global-username">
+              Username
+              <input
+                id="global-username"
+                value={authForm.username}
+                onChange={(event) =>
+                  setAuthForm((current) => ({ ...current, username: event.target.value }))
+                }
+                autoComplete="username"
+              />
+            </label>
+            <label htmlFor="global-password">
+              Password
+              <input
+                id="global-password"
+                type="password"
+                value={authForm.password}
+                onChange={(event) =>
+                  setAuthForm((current) => ({ ...current, password: event.target.value }))
+                }
+                autoComplete="current-password"
+              />
+            </label>
+            <button className="primary-action" type="submit">
+              <LockKeyhole size={18} />
+              Sign in
+            </button>
+            <p className="empty-state">
+              All users must sign in. Staff accounts get admin privileges.
+            </p>
+            {authNotice ? <p className="empty-state">{authNotice}</p> : null}
+          </form>
+        </section>
+      </main>
+    </div>
+  );
+}
+
+function AccessRequiredView({
+  setActiveView,
+  authState,
+  authForm,
+  setAuthForm,
+  authNotice,
+  submitAdminLogin,
+  submitAdminLogout,
+}) {
+  const isStaffUser = Boolean(authState.authenticated && authState.user?.isStaff);
+
+  return (
+    <section className="content-stack">
+      <div className="review-panel">
+        <div className="section-heading">
+          <LockKeyhole size={18} />
+          <h3>Access required</h3>
+        </div>
+        {authState.authenticated ? (
+          <>
+            <p className="empty-state">
+              Signed in as <strong>{authState.user?.username}</strong> (
+              {isStaffUser ? "staff" : "standard user"}).
+            </p>
+            {!isStaffUser ? (
+              <p className="empty-state">
+                This account does not have admin privileges. Sign in with a staff account.
+              </p>
+            ) : null}
+            <button
+              className="primary-action"
+              type="button"
+              onClick={submitAdminLogout}
+            >
+              <LockKeyhole size={18} />
+              Sign out
+            </button>
+          </>
+        ) : (
+          <form className="auth-inline-form" onSubmit={submitAdminLogin}>
+            <label htmlFor="access-admin-username">
+              Username
+              <input
+                id="access-admin-username"
+                value={authForm.username}
+                onChange={(event) =>
+                  setAuthForm((current) => ({ ...current, username: event.target.value }))
+                }
+                autoComplete="username"
+              />
+            </label>
+            <label htmlFor="access-admin-password">
+              Password
+              <input
+                id="access-admin-password"
+                type="password"
+                value={authForm.password}
+                onChange={(event) =>
+                  setAuthForm((current) => ({ ...current, password: event.target.value }))
+                }
+                autoComplete="current-password"
+              />
+            </label>
+            <button className="primary-action" type="submit">
+              <LockKeyhole size={18} />
+              Sign in
+            </button>
+          </form>
+        )}
+        {authNotice ? <p className="empty-state">{authNotice}</p> : null}
+        <button className="primary-action" type="button" onClick={() => setActiveView("ask")}>
+          Back to Ask AI
+        </button>
+      </div>
+    </section>
+  );
 }
 
 function AskView({
@@ -887,9 +1206,33 @@ function LibraryView({
   );
 }
 
-function AdminView({ documents, ingestForm, setIngestForm, addAdminDocument }) {
+function AdminView({
+  documents,
+  ingestForm,
+  setIngestForm,
+  addAdminDocument,
+  authState,
+  authForm,
+  setAuthForm,
+  authNotice,
+  submitAdminLogin,
+  submitAdminLogout,
+  setDocumentReviewStatus,
+}) {
   const approved = documents.filter((document) => document.status === "Approved").length;
   const pending = documents.filter((document) => document.status !== "Approved").length;
+  const isStaffUser = Boolean(authState.authenticated && authState.user?.isStaff);
+  const canManageSources = isStaffUser;
+  const roleLabel = authState.authenticated
+    ? isStaffUser
+      ? "staff"
+      : "standard user"
+    : "anonymous";
+  const reviewActions = [
+    { status: "approved", label: "Approve" },
+    { status: "rejected", label: "Reject" },
+    { status: "archived", label: "Archive" },
+  ];
 
   return (
     <section className="admin-layout">
@@ -900,70 +1243,174 @@ function AdminView({ documents, ingestForm, setIngestForm, addAdminDocument }) {
       </div>
 
       <div className="admin-grid">
-        <form className="ingest-panel" onSubmit={addAdminDocument}>
-          <div className="section-heading">
-            <Upload size={18} />
-            <h3>Add trusted source</h3>
-          </div>
+        <div className="content-stack">
+          <form className="ingest-panel" onSubmit={submitAdminLogin}>
+            <div className="section-heading">
+              <LockKeyhole size={18} />
+              <h3>Admin access</h3>
+            </div>
+            {authState.authenticated ? (
+              <>
+                <p className="empty-state">
+                  Signed in as <strong>{authState.user?.username}</strong> (
+                  {roleLabel}).
+                </p>
+                {!isStaffUser ? (
+                  <p className="empty-state">
+                    This account can browse data but cannot perform admin source actions.
+                  </p>
+                ) : null}
+                <button
+                  type="button"
+                  className="primary-action"
+                  onClick={submitAdminLogout}
+                >
+                  <LockKeyhole size={18} />
+                  Sign out
+                </button>
+              </>
+            ) : (
+              <>
+                <label htmlFor="admin-username">Username</label>
+                <input
+                  id="admin-username"
+                  value={authForm.username}
+                  onChange={(event) =>
+                    setAuthForm((current) => ({ ...current, username: event.target.value }))
+                  }
+                  autoComplete="username"
+                />
+                <label htmlFor="admin-password">Password</label>
+                <input
+                  id="admin-password"
+                  type="password"
+                  value={authForm.password}
+                  onChange={(event) =>
+                    setAuthForm((current) => ({ ...current, password: event.target.value }))
+                  }
+                  autoComplete="current-password"
+                />
+                <button type="submit" className="primary-action">
+                  <LockKeyhole size={18} />
+                  Sign in
+                </button>
+              </>
+            )}
+            {authNotice ? <p className="empty-state">{authNotice}</p> : null}
+          </form>
 
-          <label htmlFor="source-title">Title</label>
-          <input
-            id="source-title"
-            value={ingestForm.title}
-            onChange={(event) =>
-              setIngestForm((current) => ({ ...current, title: event.target.value }))
-            }
-            placeholder="Document or page title"
-          />
+          <form className="ingest-panel" onSubmit={addAdminDocument}>
+            <div className="section-heading">
+              <Upload size={18} />
+              <h3>Add trusted source</h3>
+            </div>
 
-          <label htmlFor="source-url">URL</label>
-          <input
-            id="source-url"
-            value={ingestForm.sourceUrl}
-            onChange={(event) =>
-              setIngestForm((current) => ({ ...current, sourceUrl: event.target.value }))
-            }
-            placeholder="https://..."
-          />
+            <label htmlFor="source-title">Title</label>
+            <input
+              id="source-title"
+              value={ingestForm.title}
+              onChange={(event) =>
+                setIngestForm((current) => ({ ...current, title: event.target.value }))
+              }
+              placeholder="Document or page title"
+            />
 
-          <div className="form-split">
-            <label htmlFor="source-category">
-              Category
+            <label htmlFor="source-type">
+              Source type
               <select
-                id="source-category"
-                value={ingestForm.category}
+                id="source-type"
+                value={ingestForm.sourceType}
                 onChange={(event) =>
-                  setIngestForm((current) => ({ ...current, category: event.target.value }))
+                  setIngestForm((current) => ({
+                    ...current,
+                    sourceType: event.target.value,
+                    sourceUrl: "",
+                    file: null,
+                  }))
                 }
               >
-                <option>Public services</option>
-                <option>Education</option>
-                <option>Innovation</option>
-                <option>Governance</option>
-                <option>Platform design</option>
+                <option>URL</option>
+                <option>PDF</option>
               </select>
             </label>
-            <label htmlFor="source-language">
-              Language
-              <select
-                id="source-language"
-                value={ingestForm.language}
-                onChange={(event) =>
-                  setIngestForm((current) => ({ ...current, language: event.target.value }))
-                }
-              >
-                <option>English</option>
-                <option>Kinyarwanda</option>
-                <option>Mixed</option>
-              </select>
-            </label>
-          </div>
 
-          <button type="submit" className="primary-action">
-            <Upload size={18} />
-            Queue source
-          </button>
-        </form>
+            {ingestForm.sourceType === "URL" ? (
+              <label htmlFor="source-url">
+                URL
+                <input
+                  id="source-url"
+                  value={ingestForm.sourceUrl}
+                  onChange={(event) =>
+                    setIngestForm((current) => ({ ...current, sourceUrl: event.target.value }))
+                  }
+                  placeholder="https://..."
+                  required
+                />
+              </label>
+            ) : (
+              <label htmlFor="source-file">
+                PDF file
+                <input
+                  id="source-file"
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  onChange={(event) =>
+                    setIngestForm((current) => ({
+                      ...current,
+                      file: event.target.files?.[0] || null,
+                    }))
+                  }
+                  required
+                />
+              </label>
+            )}
+
+            <div className="form-split">
+              <label htmlFor="source-category">
+                Category
+                <select
+                  id="source-category"
+                  value={ingestForm.category}
+                  onChange={(event) =>
+                    setIngestForm((current) => ({ ...current, category: event.target.value }))
+                  }
+                >
+                  <option>Public services</option>
+                  <option>Education</option>
+                  <option>Innovation</option>
+                  <option>Governance</option>
+                  <option>Platform design</option>
+                </select>
+              </label>
+              <label htmlFor="source-language">
+                Language
+                <select
+                  id="source-language"
+                  value={ingestForm.language}
+                  onChange={(event) =>
+                    setIngestForm((current) => ({ ...current, language: event.target.value }))
+                  }
+                >
+                  <option>English</option>
+                  <option>Kinyarwanda</option>
+                  <option>Mixed</option>
+                </select>
+              </label>
+            </div>
+
+            <button type="submit" className="primary-action" disabled={!canManageSources}>
+              <Upload size={18} />
+              Queue source
+            </button>
+            {!canManageSources ? (
+              <p className="empty-state">
+                {authState.authenticated
+                  ? "This account is read-only for admin actions. Sign in with a staff account."
+                  : "Sign in as a staff user to queue sources."}
+              </p>
+            ) : null}
+          </form>
+        </div>
 
         <div className="queue-panel">
           <div className="section-heading">
@@ -976,6 +1423,32 @@ function AdminView({ documents, ingestForm, setIngestForm, addAdminDocument }) {
                 <div>
                   <strong>{document.title}</strong>
                   <span>{document.category} - {document.sourceType} - {document.freshness}</span>
+                  {canManageSources && Number.isInteger(document.id) ? (
+                    <div className="queue-actions">
+                      {reviewActions.map((action) => {
+                        const normalizedStatus = document.status
+                          .toLowerCase()
+                          .replace(/\s+/g, "_");
+                        const isCurrent = normalizedStatus === action.status;
+                        return (
+                          <button
+                            key={`${document.id}-${action.status}`}
+                            type="button"
+                            disabled={isCurrent}
+                            onClick={() =>
+                              setDocumentReviewStatus(
+                                document.id,
+                                action.status,
+                                action.label.toLowerCase(),
+                              )
+                            }
+                          >
+                            {action.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
                 <StatusPill status={document.status} />
               </div>

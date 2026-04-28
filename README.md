@@ -28,10 +28,11 @@ Backend API:
 ```bash
 py -m pip install -r backend/requirements.txt
 py backend/manage.py migrate
+py backend/manage.py createsuperuser
 py backend/manage.py runserver 127.0.0.1:8000
 ```
 
-Run both, then open the frontend. The app will show `API connected` when the Django backend is available and `Demo fallback` when it is not.
+Run both, then open the frontend and sign in. All routes now require authenticated users; admin actions require a staff account.
 
 Docker Compose:
 

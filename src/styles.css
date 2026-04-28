@@ -235,6 +235,25 @@ h3 {
   background: var(--panel);
 }
 
+.system-signals .admin-status-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--blue-900);
+  background: var(--panel);
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.system-signals .admin-status-action:hover {
+  border-color: #cfe0f3;
+  background: var(--blue-100);
+}
+
 .system-signals .api-status.online {
   color: var(--green-700);
   border-color: #cde7db;
@@ -373,6 +392,11 @@ select:focus {
 
 .primary-action:hover {
   background: #174d8e;
+}
+
+.primary-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .answer-header {
@@ -641,6 +665,29 @@ select:focus {
   background: #fbfcfe;
 }
 
+.queue-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.queue-actions button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--blue-900);
+  background: white;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.queue-actions button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .review-panel {
   min-height: 260px;
 }
@@ -654,6 +701,19 @@ select:focus {
 
 .review-item:first-of-type {
   border-top: 0;
+}
+
+.auth-inline-form {
+  display: grid;
+  gap: 10px;
+}
+
+.auth-inline-form label {
+  display: grid;
+  gap: 7px;
+  color: var(--blue-900);
+  font-size: 0.86rem;
+  font-weight: 780;
 }
 
 @media (max-width: 1100px) {

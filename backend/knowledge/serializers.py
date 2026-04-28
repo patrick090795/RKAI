@@ -12,6 +12,15 @@ class AskQuestionSerializer(serializers.Serializer):
     )
 
 
+class AdminLoginSerializer(serializers.Serializer):
+    username = serializers.CharField(trim_whitespace=True)
+    password = serializers.CharField(trim_whitespace=False, write_only=True)
+
+
+class DocumentStatusUpdateSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=Document.Status.choices)
+
+
 class DocumentSerializer(serializers.ModelSerializer):
     chunk_count = serializers.SerializerMethodField()
 
@@ -71,10 +80,15 @@ class DocumentWriteSerializer(serializers.ModelSerializer):
             getattr(self.instance, "source_type", Document.SourceType.URL),
         )
         source_url = attrs.get("source_url", getattr(self.instance, "source_url", ""))
+        source_file = attrs.get("file", getattr(self.instance, "file", None))
 
         if source_type == Document.SourceType.URL and not source_url:
             raise serializers.ValidationError(
                 {"source_url": "This field is required when source_type is URL."}
+            )
+        if source_type == Document.SourceType.PDF and not source_file:
+            raise serializers.ValidationError(
+                {"file": "This field is required when source_type is PDF."}
             )
 
         return attrs

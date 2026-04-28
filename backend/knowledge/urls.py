@@ -2,9 +2,13 @@ from django.urls import path
 
 from .views import (
     AnalyticsView,
+    AuthLoginView,
+    AuthLogoutView,
+    AuthMeView,
     DocumentDetailView,
     DocumentIngestUrlView,
     DocumentListView,
+    DocumentStatusUpdateView,
     DocumentUploadView,
     FeedbackCreateView,
     HealthView,
@@ -17,12 +21,20 @@ from .views import (
 
 urlpatterns = [
     path("health/", HealthView.as_view(), name="health"),
+    path("auth/login/", AuthLoginView.as_view(), name="auth-login"),
+    path("auth/logout/", AuthLogoutView.as_view(), name="auth-logout"),
+    path("auth/me/", AuthMeView.as_view(), name="auth-me"),
     path("questions/ask/", QuestionAskView.as_view(), name="question-ask"),
     path("questions/history/", QuestionHistoryView.as_view(), name="question-history"),
     path("feedback/", FeedbackCreateView.as_view(), name="feedback-create"),
     path("documents/", DocumentListView.as_view(), name="document-list"),
     path("documents/upload/", DocumentUploadView.as_view(), name="document-upload"),
     path("documents/ingest-url/", DocumentIngestUrlView.as_view(), name="document-ingest-url"),
+    path(
+        "documents/<int:pk>/status/",
+        DocumentStatusUpdateView.as_view(),
+        name="document-status-update",
+    ),
     path("documents/<int:pk>/", DocumentDetailView.as_view(), name="document-detail"),
     path("admin/analytics/", AnalyticsView.as_view(), name="analytics"),
     path(
